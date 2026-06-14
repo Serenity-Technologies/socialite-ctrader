@@ -7,8 +7,10 @@ This is a [cTrader](https://ctrader.com/) Socialite provider for [Laravel Social
 You can install the package via composer:
 
 ```bash
-composer require serenity-technologies/socialite-ctrader
+composer require serenity_technologies/socialite-ctrader
 ```
+
+The package requires the `google/protobuf` library to communicate with the cTrader Open API binary protocol.
 
 ## Configuration
 
