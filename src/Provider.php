@@ -97,6 +97,26 @@ class Provider extends AbstractProvider implements ProviderInterface
     // -------------------------------------------------------------------------
 
     /**
+     * {@inheritdoc}
+     */
+    public function redirect()
+    {
+        $this->request = request();
+
+        return parent::redirect();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function user()
+    {
+        $this->request = request();
+
+        return parent::user();
+    }
+
+    /**
      * Build the authorisation URL that the user is redirected to.
      *
      * Query parameters per the cTrader documentation:
@@ -237,20 +257,41 @@ class Provider extends AbstractProvider implements ProviderInterface
     /**
      * Send a Protobuf message to the cTrader Open API with application authentication.
      *
-     * @param  int  $payloadType
-     * @param  Message  $message
+     * @param int $payloadType
+     * @param Message $message
      * @return Message|null
+     * @throws Exception
      */
     protected function sendApiRequest(int $payloadType, Message $message): ?Message
     {
-        $host = 'live.ctraderapi.com';
-        $port = 5035;
+        $host = $this->getConfig('base_host', 'live.ctraderapi.com');
+        $port = (int) $this->getConfig('base_port', 5035);
+        $timeout = (int) $this->getConfig('timeout', 5);
 
-        $stream = @stream_socket_client("ssl://{$host}:{$port}", $errno, $errstr, 5);
+        $context = stream_context_create([
+            'ssl' => [
+                'verify_peer' => (bool) $this->getConfig('verify_peer', true),
+                'verify_peer_name' => (bool) $this->getConfig('verify_peer', true),
+                'allow_self_signed' => (bool) $this->getConfig('allow_self_signed', false),
+                'sni_enabled' => true,
+                'peer_name' => $host,
+            ],
+        ]);
+
+        $stream = @stream_socket_client(
+            "ssl://{$host}:{$port}",
+            $errno,
+            $errstr,
+            $timeout,
+            STREAM_CLIENT_CONNECT,
+            $context
+        );
 
         if (! $stream) {
             return null;
         }
+
+        stream_set_timeout($stream, $timeout);
 
         // 1. Authenticate Application
         $authReq = new ProtoOAApplicationAuthReq();
@@ -258,7 +299,13 @@ class Provider extends AbstractProvider implements ProviderInterface
         $authReq->setClientSecret($this->clientSecret);
 
         $this->writeMessage($stream, ProtoOAPayloadType::PROTO_OA_APPLICATION_AUTH_REQ, $authReq);
-        $this->readMessage($stream); // Consume auth response
+        $authRes = $this->readMessage($stream);
+
+        if (! $authRes instanceof ProtoOAApplicationAuthRes) {
+            fclose($stream);
+
+            return null;
+        }
 
         // 2. Send actual payload
         $this->writeMessage($stream, $payloadType, $message);
@@ -269,7 +316,7 @@ class Provider extends AbstractProvider implements ProviderInterface
         return $response;
     }
 
-    protected function writeMessage($stream, int $payloadType, Message $message)
+    protected function writeMessage($stream, int $payloadType, Message $message): void
     {
         $protoMessage = new ProtoMessage();
         $protoMessage->setPayloadType($payloadType);
@@ -279,6 +326,7 @@ class Provider extends AbstractProvider implements ProviderInterface
         $length = strlen($data);
         fwrite($stream, pack('N', $length));
         fwrite($stream, $data);
+        fflush($stream);
     }
 
     /**
@@ -293,8 +341,8 @@ class Provider extends AbstractProvider implements ProviderInterface
 
         $resLength = unpack('N', $header)[1];
 
-        // Sanity check
-        if ($resLength > 1024 * 512) {
+        // Sanity check (max 1MB)
+        if ($resLength > 1024 * 1024) {
             return null;
         }
 
@@ -307,8 +355,16 @@ class Provider extends AbstractProvider implements ProviderInterface
             $data .= $chunk;
         }
 
+        if (strlen($data) < $resLength) {
+            return null;
+        }
+
         $protoMessage = new ProtoMessage();
-        $protoMessage->mergeFromString($data);
+        try {
+            $protoMessage->mergeFromString($data);
+        } catch (Exception $e) {
+            return null;
+        }
 
         $payloadType = $protoMessage->getPayloadType();
         $payload = $protoMessage->getPayload();
@@ -319,7 +375,11 @@ class Provider extends AbstractProvider implements ProviderInterface
         }
 
         $message = new $class();
-        $message->mergeFromString($payload);
+        try {
+            $message->mergeFromString($payload);
+        } catch (Exception $e) {
+            return null;
+        }
 
         return $message;
     }
