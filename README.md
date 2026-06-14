@@ -18,11 +18,29 @@ Add the configuration to your `config/services.php` file:
 
 ```php
 'ctrader' => [
-    'client_id' => env('CTRADER_CLIENT_ID'),
+    'client_id'     => env('CTRADER_CLIENT_ID'),
     'client_secret' => env('CTRADER_CLIENT_SECRET'),
-    'redirect' => env('CTRADER_REDIRECT_URI'),
+    'redirect'      => env('CTRADER_REDIRECT_URI'),
+    
+    // Optional: Protobuf Socket Settings
+    'base_host'     => env('CTRADER_BASE_HOST', 'live.ctraderapi.com'), // Use demo.ctraderapi.com for Demo
+    'base_port'     => env('CTRADER_BASE_PORT', 5035),
+    'timeout'       => env('CTRADER_TIMEOUT', 5),
+    'verify_peer'   => env('CTRADER_VERIFY_PEER', true),
+    'allow_self_signed' => env('CTRADER_ALLOW_SELF_SIGNED', false),
 ],
 ```
+
+### Advanced Settings
+
+- `base_host`: Default is `live.ctraderapi.com`. Change to `demo.ctraderapi.com` for the Sandbox/Demo environment.
+- `timeout`: Connection and read timeout in seconds (default: 5).
+- `verify_peer`: Set to `false` if your server has issues verifying SSL certificates (not recommended).
+- `allow_self_signed`: Set to `true` if using a proxy with self-signed certificates.
+
+### Laravel Octane / FrankenPHP Compatibility
+
+This provider is fully compatible with Laravel Octane and FrankenPHP. It automatically refreshes the request instance to avoid stale state issues common in persistent worker environments.
 
 ### Registration
 
