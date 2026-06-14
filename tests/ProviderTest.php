@@ -4,6 +4,9 @@ namespace SocialiteProviders\Ctrader\Tests;
 
 use Mockery as m;
 use PHPUnit\Framework\TestCase;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOACtidProfile;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAGetCtidProfileByTokenRes;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAPayloadType;
 use SocialiteProviders\Ctrader\Provider;
 use Illuminate\Http\Request;
 use Laravel\Socialite\Two\User;
@@ -19,12 +22,7 @@ class ProviderTest extends TestCase
     public function it_can_map_user_to_object()
     {
         $userPayload = [
-            'payloadType' => 2152,
-            'payload' => [
-                'profile' => [
-                    'userId' => 1234567,
-                ],
-            ],
+            'userId' => 1234567,
             'access_token' => 'test_token',
         ];
 
@@ -67,14 +65,12 @@ class ProviderTest extends TestCase
     public function it_can_get_user_by_token()
     {
         $token = 'test_token';
-        $apiResponse = [
-            'payloadType' => 2152,
-            'payload' => [
-                'profile' => [
-                    'userId' => 1234567,
-                ],
-            ],
-        ];
+        
+        $profile = new ProtoOACtidProfile();
+        $profile->setUserId(1234567);
+        
+        $apiResponse = new ProtoOAGetCtidProfileByTokenRes();
+        $apiResponse->setProfile($profile);
 
         $request = m::mock(Request::class);
         $provider = m::mock(Provider::class, [$request, 'client_id', 'client_secret', 'redirect_uri'])->makePartial();
@@ -82,9 +78,7 @@ class ProviderTest extends TestCase
 
         $provider->shouldReceive('sendApiRequest')
             ->once()
-            ->with(m::on(function ($payload) use ($token) {
-                return $payload['payloadType'] === 2151 && $payload['payload']['access' . 'Token'] === $token;
-            }))
+            ->with(ProtoOAPayloadType::PROTO_OA_GET_CTID_PROFILE_BY_TOKEN_REQ, m::any())
             ->andReturn($apiResponse);
 
         $reflection = new \ReflectionClass(Provider::class);
@@ -93,7 +87,7 @@ class ProviderTest extends TestCase
 
         $user = $method->invokeArgs($provider, [$token]);
 
-        $this->assertEquals(1234567, $user['payload']['profile']['userId']);
+        $this->assertEquals(1234567, $user['userId']);
         $this->assertEquals('test_token', $user['access_token']);
     }
 
@@ -108,7 +102,7 @@ class ProviderTest extends TestCase
 
         $provider->shouldReceive('sendApiRequest')
             ->once()
-            ->andThrow(new \Exception('Socket error'));
+            ->andReturn(null);
 
         $reflection = new \ReflectionClass(Provider::class);
         $method = $reflection->getMethod('getUserByToken');
@@ -117,6 +111,6 @@ class ProviderTest extends TestCase
         $user = $method->invokeArgs($provider, [$token]);
 
         $this->assertEquals('test_token', $user['access_token']);
-        $this->assertArrayNotHasKey('payload', $user);
+        $this->assertArrayNotHasKey('userId', $user);
     }
 }

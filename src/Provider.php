@@ -2,13 +2,25 @@
 
 namespace SocialiteProviders\Ctrader;
 
+use Exception;
+use Google\Protobuf\Internal\Message;
 use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\RequestOptions;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
 use Laravel\Socialite\Two\AbstractProvider;
 use Laravel\Socialite\Two\ProviderInterface;
 use Laravel\Socialite\Two\User;
+use SocialiteProviders\Ctrader\Protobuf\ProtoErrorRes;
+use SocialiteProviders\Ctrader\Protobuf\ProtoMessage;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAApplicationAuthReq;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAApplicationAuthRes;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAErrorRes;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAGetCtidProfileByTokenReq;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAGetCtidProfileByTokenRes;
+use SocialiteProviders\Ctrader\Protobuf\ProtoOAPayloadType;
+use SocialiteProviders\Ctrader\Protobuf\ProtoPayloadType;
 use SocialiteProviders\Manager\ConfigTrait;
 
 /**
@@ -30,10 +42,8 @@ use SocialiteProviders\Manager\ConfigTrait;
  *          - tokenType    – "bearer"
  *          - expiresIn    – seconds until expiry
  *
- *  4.  The socialite `User` is hydrated from the token response itself because cTrader
- *      does not expose a standard user-info REST endpoint.  The `id` is set to the
- *      raw `accessToken` value so downstream code can use `getid()` as a unique,
- *      stable identifier for the authenticated cTID session.
+ *  4.  The socialite `User` is hydrated from the cTID profile retrieval using Protobuf
+ *      messages over a raw SSL socket (port 5035).
  *
  * Refresh token flow (called outside Socialite after initial login):
  *      GET https://openapi.ctrader.com/apps/token
@@ -125,6 +135,7 @@ class Provider extends AbstractProvider implements ProviderInterface
      * @param string $code The authorisation code from the callback query string.
      * @return array<string, mixed> Decoded token response body.
      * @throws GuzzleException
+     * @throws ConnectionException
      */
     public function getAccessTokenResponse($code): array
     {
@@ -178,44 +189,41 @@ class Provider extends AbstractProvider implements ProviderInterface
 
     /**
      * cTrader does not expose a standard user-info REST endpoint.
-     * All available identity information is contained within the token response.
-     *
-     * The access token itself acts as the unique identifier for the authenticated
-     * cTID session. Downstream code (e.g. SocialiteController) stores the token
-     * so it can be used to call ProtoOAGetAccountListByAccessTokenReq etc.
+     * We use the Open API Protobuf protocol to retrieve the cTID profile.
      *
      * @param  string  $token  The access token.
-     * @return array<string, mixed> An array containing the token payload.
+     * @return array<string, mixed> An array containing the profile data.
      */
     protected function getUserByToken($token): array
     {
-        $payload = [
-            'payloadType' => 2151,
-            'payload' => [
-                'access' . 'Token' => $token,
-            ],
-        ];
+        $req = new ProtoOAGetCtidProfileByTokenReq();
+        $req->setAccessToken($token);
 
-        return array_merge($this->sendApiRequest($payload), ['access_token' => $token]);
+        $response = $this->sendApiRequest(ProtoOAPayloadType::PROTO_OA_GET_CTID_PROFILE_BY_TOKEN_REQ, $req);
+
+        if ($response instanceof ProtoOAGetCtidProfileByTokenRes) {
+            return [
+                'userId' => $response->getProfile()->getUserId(),
+                'access_token' => $token,
+            ];
+        }
+
+        return ['access_token' => $token];
     }
 
     /**
      * Map the raw token payload into a Socialite User object.
      *
      * Fields populated:
-     *  - id             → the access token (unique per cTID session)
+     *  - id             → the cTID user ID
      *  - token          → access token
-     *  - refreshToken   → refresh token
-     *  - expiresIn      → token TTL in seconds (~2,628,000 ≈ 30 days)
+     *  - email          → generated from user ID
      *
-     * Email and name are not available from cTrader without additional ProtoBuf
-     * message round-trips; they are left null for the controller to handle.
-     *
-     * @param  array<string, mixed>  $user  Raw user data (token payload).
+     * @param  array<string, mixed>  $user  Raw user data.
      */
     protected function mapUserToObject(array $user): User
     {
-        $id = $user['payload']['profile']['userId'] ?? $user['access_token'];
+        $id = $user['userId'] ?? $user['access_token'];
 
         return (new User)->setRaw($user)->map([
             'id' => $id,
@@ -227,44 +235,105 @@ class Provider extends AbstractProvider implements ProviderInterface
     }
 
     /**
-     * Send a message to the cTrader Open API.
+     * Send a Protobuf message to the cTrader Open API with application authentication.
      *
-     * @param  array  $payload
-     * @return array
+     * @param  int  $payloadType
+     * @param  Message  $message
+     * @return Message|null
      */
-    protected function sendApiRequest(array $payload): array
+    protected function sendApiRequest(int $payloadType, Message $message): ?Message
     {
         $host = 'live.ctraderapi.com';
-        $port = 5036;
+        $port = 5035;
 
         $stream = @stream_socket_client("ssl://{$host}:{$port}", $errno, $errstr, 5);
 
         if (! $stream) {
-            return [];
+            return null;
         }
 
-        $json = json_encode($payload);
-        $length = strlen($json);
+        // 1. Authenticate Application
+        $authReq = new ProtoOAApplicationAuthReq();
+        $authReq->setClientId($this->clientId);
+        $authReq->setClientSecret($this->clientSecret);
 
-        // Prepend 4-byte length prefix.
+        $this->writeMessage($stream, ProtoOAPayloadType::PROTO_OA_APPLICATION_AUTH_REQ, $authReq);
+        $this->readMessage($stream); // Consume auth response
+
+        // 2. Send actual payload
+        $this->writeMessage($stream, $payloadType, $message);
+        $response = $this->readMessage($stream);
+
+        fclose($stream);
+
+        return $response;
+    }
+
+    protected function writeMessage($stream, int $payloadType, Message $message)
+    {
+        $protoMessage = new ProtoMessage();
+        $protoMessage->setPayloadType($payloadType);
+        $protoMessage->setPayload($message->serializeToString());
+
+        $data = $protoMessage->serializeToString();
+        $length = strlen($data);
         fwrite($stream, pack('N', $length));
-        fwrite($stream, $json);
+        fwrite($stream, $data);
+    }
 
-        // Read 4-byte length prefix.
+    /**
+     * @throws Exception
+     */
+    protected function readMessage($stream): ?Message
+    {
         $header = fread($stream, 4);
-        if (! $header) {
-            fclose($stream);
-            return [];
+        if (! $header || strlen($header) < 4) {
+            return null;
         }
 
         $resLength = unpack('N', $header)[1];
-        $resJson = '';
-        while (strlen($resJson) < $resLength && ! feof($stream)) {
-            $resJson .= fread($stream, $resLength - strlen($resJson));
-        }
-        fclose($stream);
 
-        return (array) json_decode($resJson, true);
+        // Sanity check
+        if ($resLength > 1024 * 512) {
+            return null;
+        }
+
+        $data = '';
+        while (strlen($data) < $resLength && ! feof($stream)) {
+            $chunk = fread($stream, min($resLength - strlen($data), 8192));
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $data .= $chunk;
+        }
+
+        $protoMessage = new ProtoMessage();
+        $protoMessage->mergeFromString($data);
+
+        $payloadType = $protoMessage->getPayloadType();
+        $payload = $protoMessage->getPayload();
+
+        $class = $this->getMessageClass($payloadType);
+        if (! $class) {
+            return null;
+        }
+
+        $message = new $class();
+        $message->mergeFromString($payload);
+
+        return $message;
+    }
+
+    protected function getMessageClass(int $payloadType): ?string
+    {
+        $map = [
+            ProtoPayloadType::ERROR_RES => ProtoErrorRes::class,
+            ProtoOAPayloadType::PROTO_OA_APPLICATION_AUTH_RES => ProtoOAApplicationAuthRes::class,
+            ProtoOAPayloadType::PROTO_OA_ERROR_RES => ProtoOAErrorRes::class,
+            ProtoOAPayloadType::PROTO_OA_GET_CTID_PROFILE_BY_TOKEN_RES => ProtoOAGetCtidProfileByTokenRes::class,
+        ];
+
+        return $map[$payloadType] ?? null;
     }
 
     // -------------------------------------------------------------------------
