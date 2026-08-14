@@ -63,6 +63,15 @@ class Provider extends AbstractProvider implements ProviderInterface
     public const IDENTIFIER = 'CTRADER';
 
     /**
+     * Extra config keys forwarded from `services.ctrader` into the provider —
+     * the "scopes" key controls the OAuth scope requested during sign-in.
+     */
+    public static function additionalConfigKeys(): array
+    {
+        return ['scopes'];
+    }
+
+    /**
      * cTrader authorisation endpoint.
      * The user is redirected here so they can grant your application access to
      * one or more of their trading accounts.
@@ -83,6 +92,10 @@ class Provider extends AbstractProvider implements ProviderInterface
      *
      *  - "accounts" → read-only access (account info, statistics)
      *  - "trading"  → full access (account info + all permitted trading operations)
+     *
+     * Overridable via the provider config (`services.ctrader.scopes`) — see
+     * getScopes(). The default is "accounts" (view only); request "trading"
+     * when the app needs to place orders.
      */
     protected $scopes = ['accounts'];
 
@@ -91,6 +104,19 @@ class Provider extends AbstractProvider implements ProviderInterface
      * but since we only use one scope at a time this is a safe default).
      */
     protected $scopeSeparator = ' ';
+
+    /**
+     * {@inheritdoc}
+     *
+     * Prefer the scopes configured via `services.ctrader.scopes` (set by the
+     * host application), falling back to the provider default.
+     */
+    public function getScopes()
+    {
+        $configured = $this->getConfig('scopes');
+
+        return is_array($configured) && $configured !== [] ? $configured : $this->scopes;
+    }
 
     // -------------------------------------------------------------------------
     // Core OAuth 2.0 Methods

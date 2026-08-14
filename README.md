@@ -88,9 +88,11 @@ return Socialite::driver('ctrader')
 Unlike many other Socialite providers, cTrader does not provide a standard REST endpoint for user profile information. This provider automatically handles this by:
 
 1.  Exchanging the authorization code for an access token via REST.
-2.  Connecting to the cTrader Open API gateway via an SSL TCP socket.
+2.  Connecting to the cTrader Open API gateway via an SSL TCP socket (default port 5035).
 3.  Sending a `ProtoOAGetCtidProfileByTokenReq` message to retrieve the unique cTrader User ID.
 4.  Mapping this ID to the Socialite User object and generating a `{userId}@ctrader.com` email address.
+
+> **Note:** If you have a firewall enabled on your server, ensure that **outbound traffic is allowed on port 5035** to `live.ctraderapi.com` (or `demo.ctraderapi.com` for the sandbox environment). Failure to do so will prevent user profile retrieval.
 
 ## License
 
