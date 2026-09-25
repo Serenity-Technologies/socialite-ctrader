@@ -1,6 +1,6 @@
 # cTrader Socialite Provider
 
-This is a [cTrader](https://ctrader.com/) Socialite provider for [Laravel Socialite](https://socialitejs.com/).
+This is a [cTrader](https://ctrader.com/) Socialite provider for [Laravel Socialite](https://github.com/laravel/socialite).
 
 ## Installation
 
