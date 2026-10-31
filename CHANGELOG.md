@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-10-31
+
+### Fixed
+- The token exchange now checks the HTTP status and the presence of `accessToken`. A
+  consumed or expired code (`{"error":"invalid_grant"}`) throws a typed
+  `ProviderException` carrying the provider's `error`, `error_description` and HTTP
+  status, instead of returning an empty access token that made the protobuf setter
+  throw `Cannot convert '' to string`.
+- `parseAccessToken()` and `getUserByToken()` refuse a blank token before it reaches
+  the protobuf client, so a person signing in never sees a protobuf error.
+
 ## [Unreleased]
 
 ### Added

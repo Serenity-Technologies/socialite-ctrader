@@ -17,6 +17,7 @@ use SocialiteProviders\Ctrader\Protobuf\ProtoMessage;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAApplicationAuthReq;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAApplicationAuthRes;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAErrorRes;
+use SocialiteProviders\Ctrader\Exceptions\ProviderException;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAGetCtidProfileByTokenReq;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAGetCtidProfileByTokenRes;
 use SocialiteProviders\Ctrader\Protobuf\ProtoOAPayloadType;
@@ -182,6 +183,7 @@ class Provider extends AbstractProvider implements ProviderInterface
      * @return array<string, mixed> Decoded token response body.
      * @throws GuzzleException
      * @throws ConnectionException
+     * @throws ProviderException When the response carries no usable access token.
      */
     public function getAccessTokenResponse($code): array
     {
@@ -190,7 +192,61 @@ class Provider extends AbstractProvider implements ProviderInterface
             'Content-Type' => 'application/json',
         ])->get($this->getTokenUrl(), $this->getTokenFields($code));
 
-        return (array) json_decode((string) $response->getBody(), true);
+        return $this->assertUsableTokenResponse(
+            $response->status(),
+            (array) json_decode((string) $response->getBody(), true),
+        );
+    }
+
+    /**
+     * Refuse a token response the rest of the provider cannot use.
+     *
+     * A consumed or expired authorisation code comes back as
+     * `{"error":"invalid_grant"}` — with no `accessToken`. The old code returned
+     * that body unchanged, and `parseAccessToken()` turned the absent key into
+     * `''`, which the protobuf setter rejected with "Cannot convert '' to string".
+     * The failure now names the provider's error, and no empty token ever reaches
+     * the socket.
+     *
+     * @param  array<string, mixed>  $body
+     * @return array<string, mixed>
+     *
+     * @throws ProviderException
+     */
+    protected function assertUsableTokenResponse(int $status, array $body): array
+    {
+        $accessToken = $body['accessToken'] ?? null;
+
+        if ($status >= 200 && $status < 300 && is_string($accessToken) && $accessToken !== '') {
+            return $body;
+        }
+
+        $error = is_string($body['error'] ?? null) ? $body['error'] : null;
+        $description = is_string($body['error_description'] ?? null) ? $body['error_description'] : null;
+
+        throw new ProviderException(
+            $this->tokenFailureMessage($status, $error, $description),
+            $error,
+            $description,
+            $status,
+        );
+    }
+
+    /**
+     * A sentence support can act on, without a trailing empty reason.
+     */
+    protected function tokenFailureMessage(int $status, ?string $error, ?string $description): string
+    {
+        if ($error !== null) {
+            return sprintf(
+                'cTrader token exchange failed (HTTP %d, %s)%s',
+                $status,
+                $error,
+                $description !== null && $description !== '' ? ': '.$description : '.',
+            );
+        }
+
+        return sprintf('cTrader returned no access token (HTTP %d).', $status);
     }
 
     /**
@@ -242,6 +298,13 @@ class Provider extends AbstractProvider implements ProviderInterface
      */
     protected function getUserByToken($token): array
     {
+        // Also defended here, not only in assertUsableTokenResponse(): this is the
+        // last point before the protobuf setter, and an empty token there throws a
+        // message that means nothing to a person trying to sign in.
+        if (! is_string($token) || trim($token) === '') {
+            throw new ProviderException('cTrader cannot fetch a profile without an access token.');
+        }
+
         $req = new ProtoOAGetCtidProfileByTokenReq();
         $req->setAccessToken($token);
 
@@ -476,7 +539,13 @@ class Provider extends AbstractProvider implements ProviderInterface
      */
     protected function parseAccessToken($body): string
     {
-        return (string) Arr::get($body, 'accessToken', '');
+        $token = (string) Arr::get($body, 'accessToken', '');
+
+        if ($token === '') {
+            throw new ProviderException('cTrader token response contained no access token.');
+        }
+
+        return $token;
     }
 
     /**
